@@ -63,3 +63,41 @@ ERROR_STREAM = "".join([
     delta(0, "text_delta", text="Partial"),
     sse("error", {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}),
 ])
+
+
+def stream_for(message: dict) -> str:
+    """An SSE stream that reassembles to `message` (text, thinking and tool_use blocks)."""
+    head = {k: v for k, v in message.items() if k not in ("content", "stop_reason", "usage")}
+    usage = message.get("usage") or {"input_tokens": 10, "output_tokens": 5}
+    out = [sse("message_start", {"type": "message_start", "message": {
+        "type": "message", "role": "assistant", "content": [], **head,
+        "usage": {**usage, "output_tokens": 1}}})]
+    for i, block in enumerate(message.get("content") or []):
+        kind = block["type"]
+        start = {"type": kind, "id": block.get("id"), "name": block.get("name"), "input": {}} if kind == "tool_use" \
+            else {"type": kind, kind: ""}
+        out.append(sse("content_block_start", {"type": "content_block_start", "index": i, "content_block": start}))
+        if kind == "text":
+            out.append(delta(i, "text_delta", text=block["text"]))
+        elif kind == "thinking":
+            out.append(delta(i, "thinking_delta", thinking=block["thinking"]))
+        elif kind == "tool_use":
+            out.append(delta(i, "input_json_delta", partial_json=json.dumps(block["input"])))
+        out.append(sse("content_block_stop", {"type": "content_block_stop", "index": i}))
+    out.append(sse("message_delta", {"type": "message_delta",
+                                     "delta": {"stop_reason": message.get("stop_reason", "end_turn")},
+                                     "usage": {"output_tokens": usage.get("output_tokens", 5)}}))
+    out.append(sse("message_stop", {"type": "message_stop"}))
+    return "".join(out)
+
+
+SSE_HEADERS = [("content-type", "text/event-stream; charset=utf-8"), ("request-id", "req_1")]
+
+
+def run(store, body: dict, reply: dict | None = None, headers=(("authorization", "Bearer sk-ant-oat01-SECRET-TOKEN-xyz"),)):
+    """Drive one messages exchange through a Store; returns its id."""
+    xid = store.begin("POST", "/v1/messages?beta=true", list(headers), json.dumps(body).encode())
+    store.response(xid, 200, "OK", SSE_HEADERS)
+    store.feed(xid, stream_for(reply or {"content": [{"type": "text", "text": "ok"}]}).encode())
+    store.end(xid)
+    return xid

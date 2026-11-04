@@ -21,11 +21,18 @@ BODY = json.dumps({"model": "claude-opus-5-5", "max_tokens": 100, "stream": True
 SSE_HEADERS = [("content-type", "text/event-stream; charset=utf-8"), ("set-cookie", SET_COOKIE)]
 
 
-def drain(sub):
+def drain(sub, keep_stats=False):
+    """Raw SSE messages for one subscriber; session `stats` pushes are left out by default."""
     out = []
     while not sub.queue.empty():
-        out.append(sub.queue.get_nowait().decode())
+        message = sub.queue.get_nowait().decode()
+        if keep_stats or not message.startswith("event: stats\n"):
+            out.append(message)
     return out
+
+
+def parse(messages):
+    return [(m.split("\n")[0][len("event: "):], json.loads(m.split("\n")[1][len("data: "):])) for m in messages]
 
 
 def run_exchange(store, chunks=(STREAM.encode(),), status=200, headers=SSE_HEADERS, path="/v1/messages?beta=true"):
@@ -65,24 +72,25 @@ class StoreTest(unittest.TestCase):
 
     def test_reassembled_exchange_in_snapshot(self):
         store = Store()
-        run_exchange(store, chunks=[STREAM.encode()[i:i + 3] for i in range(0, len(STREAM.encode()), 3)])
-        ex = store.snapshot()["exchanges"][0]
+        xid = run_exchange(store, chunks=[STREAM.encode()[i:i + 3] for i in range(0, len(STREAM.encode()), 3)])
+        self.assertEqual(store.snapshot()["exchanges"][0]["state"], "done")
+        ex = store.exchange(xid)
         self.assertEqual(ex["state"], "done")
         self.assertEqual(ex["status"], 200)
         self.assertEqual(ex["kind"], "messages")
         self.assertEqual(ex["response"]["message"], EXPECTED)
         self.assertEqual(ex["response"]["raw"], STREAM)
         self.assertEqual(ex["request"]["body"]["messages"][0]["content"], "<script>alert(1)</script>")
-        self.assertIsNotNone(ex["ended_at"])
+        self.assertIsNotNone(ex["timing"]["ended_at"])
 
     def test_event_sequence_and_seq_numbers(self):
         store = Store()
         sub = store.subscribe()
         xid = run_exchange(store)
         store.flush()
-        events = [(m.split("\n")[0][len("event: "):], json.loads(m.split("\n")[1][len("data: "):])) for m in drain(sub)]
+        events = parse(drain(sub))
         names = [n for n, _ in events]
-        self.assertEqual(names[:3], ["exchange_start", "response_start", "message_start"])
+        self.assertEqual(names[:4], ["exchange_start", "exchange_meta", "response_start", "message_start"])
         self.assertEqual(names[-1], "exchange_end")
         self.assertEqual([p["seq"] for _, p in events], list(range(1, len(events) + 1)))
         self.assertTrue(all(p["id"] == xid for _, p in events))
@@ -98,11 +106,11 @@ class StoreTest(unittest.TestCase):
         store.feed(xid, data[: len(data) // 2])
         snap = store.snapshot()["exchanges"][0]
         self.assertEqual(snap["state"], "streaming")
-        store.flush()
         self.assertEqual(len(drain(sub)), snap["seq"])  # every event so far is reflected in the snapshot
+        self.assertEqual(store.exchange(xid)["seq"], snap["seq"])
         store.feed(xid, data[len(data) // 2:])
         store.end(xid)
-        self.assertEqual(store.snapshot()["exchanges"][0]["response"]["message"], EXPECTED)
+        self.assertEqual(store.exchange(xid)["response"]["message"], EXPECTED)
 
     def test_eviction_past_keep(self):
         store = Store(keep=3)
@@ -110,6 +118,8 @@ class StoreTest(unittest.TestCase):
         self.assertEqual([e["id"] for e in store.snapshot()["exchanges"]], ids[2:])
         store.feed(ids[0], b"data: {}\n\n")  # an evicted id is ignored, not an error
         store.end(ids[0])
+        self.assertEqual(store.snapshot()["evicted_before"], 2)
+        self.assertIsNone(store.exchange(ids[0]))
 
     def test_slow_subscriber_is_dropped_without_blocking(self):
         store = Store(queue_size=1000)
@@ -134,14 +144,16 @@ class StoreTest(unittest.TestCase):
 
         self.assertLess(elapsed, 1.0)   # publishing never waited on the stuck client
         self.assertTrue(slow.dead)
+        self.assertTrue(slow.resync)    # its handler sends `resync` before closing (R6)
         self.assertFalse(fast.dead)
         self.assertEqual(store.subscriber_count(), 1)
-        self.assertEqual(len(received), 1 + 1 + 1500 + 1)   # start, response_start, deltas, end
+        self.assertEqual(len(received), 1 + 1 + 1 + 1500 + 1)   # start, meta, response_start, deltas, end
 
     def test_raw_is_capped_but_message_complete(self):
         store = Store(raw_cap=200)
-        run_exchange(store)
-        resp = store.snapshot()["exchanges"][0]["response"]
+        xid = run_exchange(store)
+        self.assertTrue(store.snapshot()["exchanges"][0]["response"]["raw_truncated"])
+        resp = store.exchange(xid)["response"]
         self.assertTrue(resp["raw_truncated"])
         self.assertIn("[truncated", resp["raw"])
         self.assertLess(len(resp["raw"].encode()), 400)
@@ -153,13 +165,14 @@ class StoreTest(unittest.TestCase):
         run_exchange(store, chunks=[body], status=529, headers=[("content-type", "application/json")])
         ex = store.snapshot()["exchanges"][0]
         self.assertEqual(ex["state"], "error")
-        self.assertEqual(ex["response"]["error"], {"type": "overloaded_error", "message": "Overloaded"})
+        self.assertEqual(ex["response"]["error"],
+                         {"source": "upstream", "type": "overloaded_error", "message": "Overloaded"})
 
     def test_non_streaming_message(self):
         store = Store()
         body = json.dumps(EXPECTED).encode()
-        run_exchange(store, chunks=[body[:10], body[10:]], headers=[("content-type", "application/json")])
-        ex = store.snapshot()["exchanges"][0]
+        xid = run_exchange(store, chunks=[body[:10], body[10:]], headers=[("content-type", "application/json")])
+        ex = store.exchange(xid)
         self.assertEqual((ex["state"], ex["response"]["message"]), ("done", EXPECTED))
 
     def test_truncated_stream_is_flagged(self):
@@ -169,6 +182,7 @@ class StoreTest(unittest.TestCase):
         ex = store.snapshot()["exchanges"][0]
         self.assertEqual(ex["state"], "error")
         self.assertEqual(ex["response"]["error"]["type"], "incomplete")
+        self.assertEqual(ex["response"]["error"]["source"], "upstream")
 
     def test_end_is_idempotent_and_proxy_error_kept(self):
         store = Store()
@@ -178,12 +192,13 @@ class StoreTest(unittest.TestCase):
         ex = store.snapshot()["exchanges"][0]
         self.assertEqual((ex["status"], ex["state"]), (502, "error"))
         self.assertEqual(ex["response"]["error"]["message"], "proxy: cannot reach upstream")
+        self.assertEqual(ex["response"]["error"]["source"], "proxy")
 
     def test_non_json_request_body(self):
         store = Store()
         xid = store.begin("POST", "/backend-api/codex/responses", [], b"\xffnot json")
         store.end(xid)
-        self.assertIn("_raw", store.snapshot()["exchanges"][0]["request"]["body"])
+        self.assertIn("_raw", store.exchange(xid)["request"]["body"])
 
     def test_parallel_exchanges_do_not_mix(self):
         store = Store()
@@ -199,7 +214,7 @@ class StoreTest(unittest.TestCase):
         exchanges = store.snapshot()["exchanges"]
         self.assertEqual(len(exchanges), 8)
         for ex in exchanges:
-            self.assertEqual(ex["response"]["message"], EXPECTED)
+            self.assertEqual(store.exchange(ex["id"])["response"]["message"], EXPECTED)
 
 
 if __name__ == "__main__":

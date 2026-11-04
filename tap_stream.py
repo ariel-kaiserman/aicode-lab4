@@ -11,7 +11,7 @@ split anywhere (mid-line, mid-UTF-8 sequence), and it
         message_start  {"message": {...}}                     (metadata, empty content)
         block_start    {"index", "type", "block", ["name", "tool_use_id"]}
         block_delta    {"index", "delta_type": text|thinking|input_json, "text"}
-        block_stop     {"index", ["input"]}                   (input only for tool_use)
+        block_stop     {"index", ["input", "name", "tool_use_id"]}   (only for tool_use)
         message_delta  {"stop_reason", "stop_sequence", "usage"}
 
 An upstream `error` event is recorded in `self.error`; `ping` is ignored.
@@ -161,8 +161,11 @@ class MessageStream:
                     tool_input = json.loads(raw) if raw.strip() else {}
                 except ValueError:
                     tool_input = {"_partial_json": raw}
-                self._block(index)["input"] = tool_input
+                block = self._block(index)
+                block["input"] = tool_input
                 event["input"] = tool_input
+                event["name"] = block.get("name")
+                event["tool_use_id"] = block.get("id")
             return [("block_stop", event)]
 
         if kind == "message_delta":
