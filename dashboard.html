@@ -1,0 +1,972 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>proxy.py · live traffic</title>
+<style>
+:root {
+  --bg: #f6f6f8; --panel: #ffffff; --fg: #1d1d22; --muted: #6c6c78; --border: #e2e2e8;
+  --user: #eef4ff; --user-b: #c6d9ff; --asst: #f4f1ff; --asst-b: #dcd2ff;
+  --card: #fbfaf6; --card-b: #e8e0c8; --code: #f0f0f4; --sel: #e6eeff;
+  --ok: #1e7f46; --err: #c42b2b; --err-bg: #fdeded; --warn: #a76200; --accent: #3866d8;
+  --grey: #8a8a96;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  color-scheme: light dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141518; --panel: #1c1d21; --fg: #e5e5ea; --muted: #9797a4; --border: #2d2f35;
+    --user: #1a2536; --user-b: #2b4166; --asst: #211d30; --asst-b: #3b3163;
+    --card: #1f1e1a; --card-b: #45402f; --code: #25272c; --sel: #22304a;
+    --ok: #4cc27a; --err: #ff6f6f; --err-bg: #3a1d1d; --warn: #e2a14a; --accent: #7ea4ff;
+    --grey: #777784;
+  }
+}
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; height: 100%; }
+body { background: var(--bg); color: var(--fg); font: 14px/1.5 var(--sans); }
+button { font: inherit; color: inherit; }
+code, pre, .mono { font-family: var(--mono); font-size: 12.5px; }
+.muted { color: var(--muted); }
+.small { font-size: 12px; }
+
+#app { display: grid; grid-template-columns: 340px minmax(0, 1fr); height: 100vh; }
+
+/* ---- left: exchange list ---- */
+#side { display: flex; flex-direction: column; border-right: 1px solid var(--border); background: var(--panel); min-height: 0; }
+#sidehead { padding: 10px 12px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 8px; }
+.toprow { display: flex; align-items: center; gap: 10px; }
+.conn { font-weight: 600; }
+.conn.on { color: var(--ok); }
+.conn.off { color: var(--err); }
+#filter { font: inherit; padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--fg); }
+#list { overflow-y: auto; flex: 1; min-height: 0; }
+.row { padding: 7px 12px; border-bottom: 1px solid var(--border); cursor: pointer; }
+.row:hover { background: var(--bg); }
+.row.sel { background: var(--sel); box-shadow: inset 3px 0 0 var(--accent); }
+.row .l1 { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.row .xid { font-weight: 600; font-family: var(--mono); font-size: 12.5px; min-width: 32px; }
+.row .time { color: var(--muted); font-family: var(--mono); font-size: 12px; }
+.row .model { font-weight: 500; overflow: hidden; text-overflow: ellipsis; }
+.row .l1 .badge { margin-left: auto; }
+.row .l2 { color: var(--muted); font-size: 12.5px; margin: 2px 0 0 40px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row.other { color: var(--grey); padding: 4px 12px; font-size: 12.5px; }
+.row.other .model { font-weight: 400; font-family: var(--mono); font-size: 12px; }
+.empty-list { padding: 20px 14px; color: var(--muted); }
+
+.badge { font-size: 11.5px; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); white-space: nowrap; color: var(--muted); }
+.badge.live { color: var(--accent); border-color: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
+.badge.pending { font-style: italic; }
+.badge.err { color: var(--err); border-color: var(--err); }
+.badge.sr-end_turn { color: var(--ok); border-color: var(--ok); }
+.badge.sr-tool_use { color: var(--accent); }
+.badge.sr-max_tokens, .badge.sr-refusal { color: var(--warn); border-color: var(--warn); }
+@keyframes pulse { 50% { opacity: .45; } }
+
+/* ---- right: detail ---- */
+#main { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#dhead { background: var(--panel); border-bottom: 1px solid var(--border); padding: 10px 18px 0; }
+#meta .l1 { display: flex; align-items: baseline; flex-wrap: wrap; gap: 10px; }
+#meta .xid { font-weight: 700; font-size: 16px; }
+#meta .method { font-weight: 600; font-family: var(--mono); }
+#meta .path { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+#meta .l2, #meta .l3 { color: var(--muted); margin-top: 2px; }
+#meta .l2 b { color: var(--fg); font-weight: 600; }
+.status { font-family: var(--mono); font-weight: 600; padding: 0 6px; border-radius: 4px; }
+.status.ok { color: var(--ok); } .status.bad { color: var(--err); }
+.chip { display: inline-block; font-size: 12px; padding: 1px 8px; border-radius: 10px; background: var(--code); border: 1px solid var(--border); color: var(--muted); }
+.chip.link { cursor: pointer; color: var(--accent); }
+.chip.newconv { color: var(--warn); }
+.banner { margin: 8px 0 0; padding: 8px 12px; border-radius: 6px; background: var(--err-bg); color: var(--err); border: 1px solid var(--err); font-weight: 500; white-space: pre-wrap; word-break: break-word; }
+#tabs { display: flex; align-items: center; gap: 2px; margin-top: 8px; }
+#tabs .tab { border: 0; background: none; padding: 6px 12px; cursor: pointer; color: var(--muted); border-bottom: 2px solid transparent; }
+#tabs .tab.active { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+#tabs .spacer { flex: 1; }
+#follow { border: 1px solid var(--border); background: var(--bg); border-radius: 14px; padding: 2px 12px; cursor: pointer; margin-bottom: 4px; }
+#follow.on { color: var(--ok); border-color: var(--ok); }
+#drawerBtn { display: none; border: 1px solid var(--border); background: var(--bg); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+#dbody { flex: 1; overflow-y: auto; padding: 14px 18px 60px; min-height: 0; }
+
+.empty { max-width: 620px; margin: 60px auto; color: var(--muted); }
+.empty h2 { color: var(--fg); font-weight: 600; }
+
+/* conversation */
+.fold { margin: 6px 0; }
+.fold > summary { cursor: pointer; padding: 4px 6px; border-radius: 6px; user-select: none; }
+.fold > summary:hover { background: var(--code); }
+.top-fold > summary { font-weight: 500; }
+.divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; margin: 16px 0 8px; }
+.divider::before, .divider::after { content: ""; flex: 1; border-top: 1px solid var(--border); }
+.divider::before { flex: 0 0 18px; }
+.msg { border: 1px solid var(--border); border-radius: 10px; padding: 8px 12px 10px; margin: 8px 0; max-width: 980px; }
+.msg.role-user { background: var(--user); border-color: var(--user-b); }
+.msg.role-assistant { background: var(--asst); border-color: var(--asst-b); }
+.msg .role { font-size: 11.5px; font-weight: 700; letter-spacing: .06em; color: var(--muted); margin-bottom: 4px; }
+.blocks > * + * { margin-top: 8px; }
+.pre { white-space: pre-wrap; word-break: break-word; }
+.dim { color: var(--muted); }
+.tag { font-family: var(--mono); font-size: 12px; color: var(--accent); }
+.tag::before { content: "<"; } .tag::after { content: ">"; }
+.md p { margin: 0 0 8px; white-space: pre-wrap; word-break: break-word; }
+.md p:last-child { margin-bottom: 0; }
+.md ul, .md ol { margin: 4px 0 8px; padding-left: 22px; }
+.md h4 { margin: 10px 0 4px; font-size: 14px; }
+.md code, .karg, .inline-code { background: var(--code); padding: 1px 4px; border-radius: 4px; }
+pre.code, pre.json, pre.out, pre.sys-text { background: var(--code); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; margin: 4px 0; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+pre.code { white-space: pre; }
+pre.code .lang { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.thinking { font-style: italic; color: var(--muted); padding: 4px 8px; border-left: 3px solid var(--asst-b); }
+.cursor { display: inline-block; width: .55em; height: 1.05em; vertical-align: text-bottom; background: var(--accent); margin-left: 2px; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.card { border: 1px solid var(--card-b); background: var(--card); border-radius: 8px; padding: 6px 10px; }
+.card.is-error { border-color: var(--err); }
+.card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; cursor: pointer; }
+.card-head .tname { font-weight: 600; }
+.card-head .karg { font-family: var(--mono); font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.card-head .jump { margin-left: auto; font-size: 12px; color: var(--accent); opacity: .7; }
+.card-head:hover .jump { opacity: 1; text-decoration: underline; }
+.good { color: var(--ok); font-weight: 600; } .bad { color: var(--err); font-weight: 600; }
+.more { margin-top: 2px; border: 1px solid var(--border); background: var(--panel); border-radius: 6px; padding: 2px 10px; cursor: pointer; font-size: 12px; }
+.partial { opacity: .85; }
+.flash { animation: flash 1.6s ease-out; }
+@keyframes flash { 0%, 30% { box-shadow: 0 0 0 3px var(--accent); } 100% { box-shadow: 0 0 0 0 transparent; } }
+.sysblock + .sysblock { margin-top: 10px; }
+.sys-meta { font-size: 12px; color: var(--muted); display: flex; gap: 8px; }
+.pin { color: var(--warn); }
+.toollist { padding-left: 12px; }
+.toollist .fold { margin: 2px 0; }
+.waiting { color: var(--muted); font-style: italic; padding: 6px 2px; }
+
+/* raw tabs */
+.raw { margin-bottom: 16px; }
+.raw-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; font-weight: 600; }
+.copy { border: 1px solid var(--border); background: var(--panel); border-radius: 6px; padding: 1px 10px; cursor: pointer; font-size: 12px; font-weight: 400; }
+.raw pre { max-height: none; }
+
+#toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 6px 14px; border-radius: 8px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; }
+#toast.show { opacity: .92; }
+
+/* narrow screens: the list becomes a drawer at the top */
+@media (max-width: 899px) {
+  #app { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+  #side { border-right: 0; border-bottom: 1px solid var(--border); }
+  #list { display: none; max-height: 45vh; }
+  body.drawer #list { display: block; }
+  #drawerBtn { display: inline-block; }
+  #dhead, #dbody { padding-left: 12px; padding-right: 12px; }
+}
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="side">
+    <div id="sidehead">
+      <div class="toprow">
+        <span id="conn" class="conn off">○ connecting…</span>
+        <span id="session" class="muted small"></span>
+        <span class="spacer" style="flex:1"></span>
+        <button id="drawerBtn" type="button" title="Show the exchange list">☰ list</button>
+      </div>
+      <div class="toprow">
+        <label class="muted small" for="filter">filter</label>
+        <select id="filter">
+          <option value="messages">messages only</option>
+          <option value="all">all traffic</option>
+        </select>
+        <span id="count" class="muted small"></span>
+      </div>
+    </div>
+    <div id="list"></div>
+  </aside>
+  <main id="main">
+    <div id="dhead">
+      <div id="meta"></div>
+      <div id="tabs">
+        <button class="tab" data-tab="conv" type="button">Conversation</button>
+        <button class="tab" data-tab="req" type="button">Raw request</button>
+        <button class="tab" data-tab="resp" type="button">Raw response</button>
+        <span class="spacer"></span>
+        <button id="follow" class="on" type="button" title="Jump to each new exchange and scroll while it streams">● following live</button>
+      </div>
+    </div>
+    <div id="dbody"></div>
+  </main>
+</div>
+<div id="toast"></div>
+<noscript>This dashboard needs JavaScript.</noscript>
+<script>
+'use strict';
+(() => {
+// ===== state =================================================================
+const S = {
+  session: null, keep: 200, proxy: null,
+  ex: new Map(),        // id -> exchange (shape from tap_store.Exchange)
+  order: [],            // ids, ascending
+  maxId: 0,
+  selected: null, follow: true,
+  filter: 'messages', tab: 'conv',
+};
+const openState = new Map();   // collapsible key -> open?
+const prevCache = new Map();   // exchange id -> previous exchange id in the same conversation, or 0
+const D = { list: false, rows: new Set(), detail: false, head: false, resp: false, scroll: false };
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const E = {
+  list: $('#list'), meta: $('#meta'), body: $('#dbody'), conn: $('#conn'), session: $('#session'),
+  filter: $('#filter'), follow: $('#follow'), tabs: $('#tabs'), drawer: $('#drawerBtn'),
+  count: $('#count'), toast: $('#toast'),
+};
+
+// ===== DOM helpers (all captured text goes in as text nodes) =================
+function h(tag, attrs, ...kids) {
+  const el = document.createElement(tag);
+  if (attrs) for (const [k, v] of Object.entries(attrs)) {
+    if (v == null || v === false) continue;
+    if (k === 'class') el.className = v;
+    else if (k === 'dataset') Object.assign(el.dataset, v);
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? '' : v);
+  }
+  for (const c of kids.flat(Infinity)) {
+    if (c == null || c === false) continue;
+    el.append(c instanceof Node ? c : String(c));
+  }
+  return el;
+}
+const muted = (t) => h('span', { class: 'muted' }, t);
+const pretty = (v) => { try { const s = JSON.stringify(v, null, 2); return s === undefined ? String(v) : s; } catch { return String(v); } };
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const pad = (n) => String(n).padStart(2, '0');
+function fmtTime(iso) { if (!iso) return ''; const d = new Date(iso); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; }
+function fmtTok(n) { if (n == null) return '–'; if (n < 1000) return String(n); return (n / 1000).toFixed(n >= 100000 ? 0 : 1) + 'k'; }
+function fmtDur(ms) { if (ms == null || isNaN(ms)) return '…'; return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`; }
+function fmtSize(n) { return n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`; }
+function fmtChars(n) { return n >= 1000 ? `${(n / 1000).toFixed(1)}k chars` : `${n} chars`; }
+function oneLine(s, max = 90) { s = String(s).replace(/\s+/g, ' ').trim(); return s.length > max ? s.slice(0, max) + '…' : s; }
+function plural(n, w) { return `${n} ${w}${n === 1 ? '' : 's'}`; }
+function shortModel(m) { if (!m) return ''; const x = /(opus|sonnet|haiku|fable)/i.exec(m); return x ? x[1].toLowerCase() : m.replace(/^claude-/, '').slice(0, 16); }
+
+function collapsible(key, summary, render, defOpen = false, cls = '') {
+  const d = h('details', { class: 'fold ' + cls }, h('summary', null, summary));
+  let filled = false;
+  d._fill = () => { if (!filled) { filled = true; const c = render(); if (c) d.append(c); } };
+  if (key && openState.has(key) ? openState.get(key) : defOpen) { d.open = true; d._fill(); }
+  d.addEventListener('toggle', () => { if (d.open) d._fill(); if (key) openState.set(key, d.open); });
+  return d;
+}
+
+let toastTimer = 0;
+function toast(msg) { E.toast.textContent = msg; E.toast.classList.add('show'); clearTimeout(toastTimer); toastTimer = setTimeout(() => E.toast.classList.remove('show'), 2500); }
+
+async function copyText(text, btn) {
+  try { await navigator.clipboard.writeText(text); }
+  catch { const ta = h('textarea'); ta.value = text; document.body.append(ta); ta.select(); document.execCommand('copy'); ta.remove(); }
+  btn.textContent = 'copied ✓'; setTimeout(() => { btn.textContent = 'copy'; }, 1200);
+}
+
+// ===== exchange helpers ======================================================
+const reqBody = (ex) => ex && ex.request && ex.request.body;
+const respMsg = (ex) => ex && ex.response && ex.response.message;
+const isConv = (ex) => ex && ex.kind === 'messages' && reqBody(ex) && Array.isArray(reqBody(ex).messages);
+const visible = (ex) => S.filter === 'all' || ex.kind === 'messages';
+const tabFor = (ex) => (isConv(ex) ? S.tab : (S.tab === 'conv' ? 'resp' : S.tab));
+function newestVisibleId() { for (let i = S.order.length - 1; i >= 0; i--) { const ex = S.ex.get(S.order[i]); if (ex && visible(ex)) return ex.id; } return null; }
+function errText(ex) {
+  const err = ex.response && ex.response.error;
+  if (err) return (err.type && err.type !== 'error' ? err.type + ': ' : '') + (err.message || '');
+  if (ex.status >= 400) return `HTTP ${ex.status}`;
+  return '';
+}
+function eachBlock(messages, fn) {
+  for (const m of messages || []) if (m && Array.isArray(m.content)) for (const b of m.content) if (b && fn(b)) return true;
+  return false;
+}
+
+// ----- 7.2: find the earlier request of the same conversation ---------------
+function stable(v) { return JSON.stringify(v, (k, val) => (k === 'cache_control' ? undefined : val)) || ''; }
+function hash(s) { let x = 0x811c9dc5; for (let i = 0; i < s.length; i++) { x ^= s.charCodeAt(i); x = Math.imul(x, 0x01000193); } return (x >>> 0).toString(36) + ':' + s.length; }
+const infoCache = new WeakMap();   // request body -> { sysKey, hashes }
+function convInfo(ex) {
+  const b = reqBody(ex);
+  let c = infoCache.get(b);
+  if (!c) { c = { sysKey: (b.model || '') + '|' + hash(stable(b.system)), _h: null }; infoCache.set(b, c); }
+  if (!c._h) c._h = b.messages.map((m) => hash(stable(m)));
+  return c;
+}
+function sysKeyOf(ex) { const b = reqBody(ex); const c = infoCache.get(b); return c ? c.sysKey : convInfo(ex).sysKey; }
+function findPrev(ex) {
+  if (!isConv(ex)) return null;
+  if (prevCache.has(ex.id)) { const p = S.ex.get(prevCache.get(ex.id)); if (p || prevCache.get(ex.id) === 0) return p || null; }
+  const key = sysKeyOf(ex);
+  let found = 0;
+  for (let i = S.order.indexOf(ex.id) - 1; i >= 0 && !found; i--) {
+    const p = S.ex.get(S.order[i]);
+    if (!isConv(p) || sysKeyOf(p) !== key) continue;
+    const a = convInfo(p)._h, b = convInfo(ex)._h;
+    if (a.length > b.length) continue;
+    let ok = true;
+    for (let j = 0; j < a.length; j++) if (a[j] !== b[j]) { ok = false; break; }
+    if (ok) found = p.id;
+  }
+  prevCache.set(ex.id, found);
+  return found ? S.ex.get(found) : null;
+}
+
+// ===== Markdown (input is untrusted: every piece is escaped, only fixed tags emitted) =====
+function inline(s) {
+  return s.split(/(`[^`\n]+`)/).map((part, i) =>
+    i % 2 ? '<code>' + esc(part.slice(1, -1)) + '</code>'
+          : esc(part).replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>')).join('');
+}
+function markdown(text) {
+  const lines = String(text).split('\n'), out = [];
+  let para = [], list = null;
+  const flushPara = () => { if (para.length) { out.push('<p>' + para.map(inline).join('<br>') + '</p>'); para = []; } };
+  const flushList = () => { if (list) { out.push(`<${list.tag}>` + list.items.map((x) => '<li>' + inline(x) + '</li>').join('') + `</${list.tag}>`); list = null; } };
+  for (let i = 0; i < lines.length;) {
+    const line = lines[i];
+    const fence = /^\s*```(.*)$/.exec(line);
+    if (fence) {
+      flushPara(); flushList();
+      const buf = []; i++;
+      while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) buf.push(lines[i++]);
+      i++;
+      const lang = fence[1].trim();
+      out.push('<pre class="code">' + (lang ? '<span class="lang">' + esc(lang) + '</span>' : '') + '<code>' + esc(buf.join('\n')) + '</code></pre>');
+      continue;
+    }
+    const li = /^\s*(?:[-*+]|(\d+)[.)])\s+(.*)$/.exec(line);
+    if (li) {
+      flushPara();
+      const tag = li[1] ? 'ol' : 'ul';
+      if (!list || list.tag !== tag) { flushList(); list = { tag, items: [] }; }
+      list.items.push(li[2]); i++; continue;
+    }
+    const hd = /^#{1,6}\s+(.*)$/.exec(line);
+    if (hd) { flushPara(); flushList(); out.push('<h4>' + inline(hd[1]) + '</h4>'); i++; continue; }
+    if (!line.trim()) { flushPara(); flushList(); i++; continue; }
+    flushList(); para.push(line); i++;
+  }
+  flushPara(); flushList();
+  return out.join('');
+}
+
+// ===== block renderers (7.3) =================================================
+const KEY_ARG = { Bash: 'command', Read: 'file_path', Edit: 'file_path', MultiEdit: 'file_path', Write: 'file_path',
+  NotebookEdit: 'notebook_path', Grep: 'pattern', Glob: 'pattern', WebFetch: 'url', WebSearch: 'query',
+  Task: 'description', Agent: 'description', Skill: 'skill', TodoWrite: 'todos' };
+function argText(v) {
+  if (Array.isArray(v)) return plural(v.length, 'item');
+  v = String(v); const first = v.split('\n')[0];
+  return first.length > 160 ? first.slice(0, 160) + '…' : first !== v ? first + ' …' : first;
+}
+function keyArg(name, input) {
+  if (!input || typeof input !== 'object') return '';
+  let v = KEY_ARG[name] ? input[KEY_ARG[name]] : undefined;
+  if (v == null) for (const x of Object.values(input)) if (typeof x === 'string') { v = x; break; }
+  return v == null ? '' : argText(v);
+}
+function partialKeyArg(name, partial) {
+  const k = KEY_ARG[name]; if (!k || !partial) return '';
+  const m = new RegExp('"' + k + '"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)').exec(partial);
+  if (!m) return '';
+  let s = m[1]; try { s = JSON.parse('"' + s.replace(/\\$/, '') + '"'); } catch { /* keep raw */ }
+  return argText(s);
+}
+
+function renderContent(content, role, ctx, key) {
+  if (typeof content === 'string') return [renderText(content, role, key + ':s')];
+  if (!Array.isArray(content)) return [renderUnknown(content, key + ':u')];
+  return content.map((b, i) => renderBlock(b, role, ctx, key + ':' + i));
+}
+function renderBlock(b, role, ctx, key) {
+  if (!b || typeof b !== 'object') return renderUnknown(b, key);
+  switch (b.type) {
+    case 'text': return renderText(b.text || '', role, key, b);
+    case 'thinking': return renderThinking(b, key);
+    case 'redacted_thinking': return h('div', null, h('span', { class: 'chip' }, '💭 redacted thinking (encrypted, not shown)'));
+    case 'tool_use': case 'server_tool_use': case 'mcp_tool_use': return renderToolUse(b, ctx, key);
+    case 'tool_result': case 'mcp_tool_result': return renderToolResult(b, ctx, key);
+    case 'image': case 'document': return renderMedia(b);
+    default: return renderUnknown(b, key);
+  }
+}
+const pinChip = (b) => (b && b.cache_control ? h('span', { class: 'pin small', title: 'cache_control: ' + JSON.stringify(b.cache_control) }, ' 📌') : null);
+
+// XML-ish sections Claude Code injects (<system-reminder>, <command-name>, …): tag names with - or _
+const TAG_RE = /<([A-Za-z][\w]*[-_][\w-]*)(?:\s[^>]*)?>([\s\S]*?)<\/\1>/g;
+function renderText(text, role, key, block) {
+  if (role === 'assistant') {
+    const d = h('div', { class: 'md' });
+    d.innerHTML = markdown(text);   // markdown() escapes everything it emits
+    if (block && block.cache_control) d.append(pinChip(block));
+    return d;
+  }
+  const wrap = h('div', { class: 'text' });
+  const plain = (s) => { s = s.replace(/^\n+|\s+$/g, ''); if (s) wrap.append(h('div', { class: 'pre' }, s)); };
+  let last = 0, n = 0, m;
+  TAG_RE.lastIndex = 0;
+  while ((m = TAG_RE.exec(text))) {
+    plain(text.slice(last, m.index));
+    const name = m[1], inner = m[2].trim();
+    wrap.append(collapsible(key + ':x' + (n++), [h('span', { class: 'tag' }, name), ' ', muted(fmtChars(inner.length))],
+      () => h('div', { class: 'pre dim' }, inner)));
+    last = TAG_RE.lastIndex;
+  }
+  plain(text.slice(last));
+  if (!wrap.childNodes.length) wrap.append(h('div', { class: 'muted' }, '(empty text)'));
+  if (block && block.cache_control) wrap.append(pinChip(block));
+  return wrap;
+}
+function renderThinking(b, key) {
+  const t = b.thinking || '';
+  return collapsible(key, ['💭 thinking ', muted(fmtChars(t.length))], () => h('div', { class: 'pre thinking' }, t));
+}
+function renderToolUse(b, ctx, key) {
+  const streaming = b._partial != null;
+  const arg = streaming ? partialKeyArg(b.name, b._partial) : keyArg(b.name, b.input);
+  const head = h('div', { class: 'card-head', title: 'Jump to the matching tool_result', onclick: () => jumpToResult(b.id, ctx) },
+    h('span', null, '🔧'), h('span', { class: 'tname' }, b.name || b.type),
+    arg ? h('code', { class: 'karg' }, arg) : null,
+    b.type !== 'tool_use' ? muted(b.type) : null,
+    h('span', { class: 'jump' }, '↪ result'));
+  const card = h('div', { class: 'card tool-use', dataset: { tuse: b.id || '' } }, head);
+  if (streaming) card.append(h('pre', { class: 'json partial' }, b._partial || '…'));
+  else card.append(collapsible(key + ':in', muted('input'), () => h('pre', { class: 'json' }, pretty(b.input))));
+  return card;
+}
+function splitResult(c) {
+  if (typeof c === 'string') return { text: c, extras: [] };
+  if (Array.isArray(c)) {
+    const texts = [], extras = [];
+    for (const x of c) (x && x.type === 'text' ? texts.push(x.text || '') : extras.push(x));
+    return { text: texts.join('\n'), extras };
+  }
+  return { text: '', extras: c == null ? [] : [c] };
+}
+function longText(text, key) {
+  const lines = text.split('\n');
+  const pre = h('pre', { class: 'out' });
+  if (lines.length <= 20 || openState.get(key + ':all')) { pre.textContent = text; return pre; }
+  pre.textContent = lines.slice(0, 8).join('\n');
+  const btn = h('button', { class: 'more', type: 'button', onclick: () => { openState.set(key + ':all', true); pre.textContent = text; btn.remove(); } }, `show all ${lines.length} lines`);
+  return h('div', null, pre, btn);
+}
+function renderToolResult(b, ctx, key) {
+  const name = ctx.toolNames.get(b.tool_use_id);
+  const { text, extras } = splitResult(b.content);
+  const nlines = text ? text.split('\n').length : 0;
+  const err = !!b.is_error;
+  const head = h('div', { class: 'card-head', title: 'Jump to the matching tool_use', onclick: () => jumpToUse(b.tool_use_id, ctx) },
+    h('span', null, '↩'), h('span', { class: 'tname' }, 'tool_result'), name ? muted(`(${name})`) : null,
+    h('span', { class: err ? 'bad' : 'good' }, err ? '✗ error' : '✓'), muted(plural(nlines, 'line')),
+    h('span', { class: 'jump' }, '↩ call'));
+  const card = h('div', { class: 'card tool-result' + (err ? ' is-error' : ''), dataset: { tres: b.tool_use_id || '' } }, head);
+  if (text) card.append(longText(text, key));
+  extras.forEach((x, i) => card.append(renderBlock(x, 'user', ctx, key + ':e' + i)));
+  if (!text && !extras.length) card.append(h('div', { class: 'muted small' }, '(empty)'));
+  return card;
+}
+function renderMedia(b) {
+  const src = b.source || {};
+  let size = '';
+  if (typeof src.data === 'string') size = fmtSize(src.type === 'base64' ? Math.floor(src.data.length * 3 / 4) : src.data.length);
+  const parts = [b.type === 'image' ? '🖼 image' : '📄 document', src.media_type || src.type, size, src.url, b.title].filter(Boolean);
+  return h('div', null, h('span', { class: 'chip' }, parts.join(' · ')));
+}
+function renderUnknown(b, key) {
+  const s = pretty(b);
+  const label = b && typeof b === 'object' && b.type ? b.type : typeof b;
+  return collapsible(key, ['🧩 ', h('span', { class: 'mono' }, label), ' ', muted(fmtChars(s.length))], () => h('pre', { class: 'json' }, s), s.length < 1500);
+}
+function renderMessage(m, ctx, key) {
+  const role = (m && m.role) || 'unknown';
+  const icon = role === 'user' ? '👤' : role === 'assistant' ? '🤖' : '❔';
+  return h('div', { class: 'msg role-' + role },
+    h('div', { class: 'role' }, `${icon} ${role.toUpperCase()}`),
+    h('div', { class: 'blocks' }, renderContent(m && m.content, role, ctx, key)));
+}
+function toolNamesOf(messages, more) {
+  const map = new Map();
+  const add = (b) => { if (b.id && /tool_use$/.test(b.type || '')) map.set(b.id, b.name); return false; };
+  eachBlock(messages, add);
+  if (more) eachBlock([more], add);
+  return map;
+}
+
+// ===== detail pane ===========================================================
+let renderedId = null;
+function renderDetail() {
+  const ex = S.ex.get(S.selected);
+  const same = renderedId === S.selected;
+  renderedId = S.selected;
+  const top = E.body.scrollTop;
+  E.body.replaceChildren();
+  if (!ex) {
+    E.meta.replaceChildren(); E.tabs.hidden = true;
+    E.body.append(emptyState());
+    return;
+  }
+  E.tabs.hidden = false;
+  renderHeader(ex);
+  renderTabs(ex);
+  const tab = tabFor(ex);
+  if (tab === 'conv') renderConversation(ex, E.body);
+  else if (tab === 'req') renderRawRequest(ex, E.body);
+  else renderRawResponse(ex, E.body);
+  E.body.scrollTop = same ? top : 0;
+}
+function emptyState() {
+  const url = (S.proxy && S.proxy.url) || 'http://localhost:8041';
+  const hidden = S.ex.size && S.filter === 'messages';
+  return h('div', { class: 'empty' },
+    h('h2', null, hidden ? 'No messages requests yet' : 'Waiting for traffic'),
+    hidden ? h('p', null, 'Other traffic was captured. Set the filter to "all traffic" to see it.') : null,
+    h('p', null, 'Run the agent through the proxy:'),
+    h('pre', { class: 'code' }, `ANTHROPIC_BASE_URL=${url} claude`),
+    h('p', null, 'Each API call appears on the left as it happens, and the model\'s reply streams in here.'));
+}
+function renderTabs(ex) {
+  const tab = tabFor(ex);
+  for (const b of E.tabs.querySelectorAll('.tab')) {
+    b.classList.toggle('active', b.dataset.tab === tab);
+    b.hidden = b.dataset.tab === 'conv' && !isConv(ex);
+  }
+}
+function renderHeader(ex) {
+  const b = reqBody(ex) || {};
+  const m = respMsg(ex);
+  const u = (m && m.usage) || {};
+  const t0 = Date.parse(ex.started_at);
+  const ttfb = ex.response_at ? Date.parse(ex.response_at) - t0 : null;
+  const total = ex.ended_at ? Date.parse(ex.ended_at) - t0 : null;
+  const elapsed = Date.now() - t0;
+  const okStatus = ex.status != null && ex.status < 400;
+  const timing = ex.ended_at ? `TTFB ${fmtDur(ttfb)} · total ${fmtDur(total)}`
+    : ex.response_at ? `TTFB ${fmtDur(ttfb)} · ${fmtDur(elapsed)}…` : `waiting ${fmtDur(elapsed)}…`;
+  const l1 = h('div', { class: 'l1' },
+    h('span', { class: 'xid' }, '#' + ex.id), h('span', { class: 'method' }, ex.method), h('span', { class: 'path' }, ex.path),
+    ex.status != null ? h('span', { class: 'status ' + (okStatus ? 'ok' : 'bad') }, String(ex.status)) : null,
+    muted(timing), muted('· ' + fmtTime(ex.started_at)));
+  const kids = [l1];
+  if (isConv(ex)) {
+    const parts = [];
+    const model = b.model || (m && m.model);
+    if (model) parts.push(h('b', null, model));
+    if (b.max_tokens != null) parts.push(`max_tokens ${b.max_tokens}`);
+    if (b.thinking && b.thinking.type) parts.push(`thinking ${b.thinking.type}${b.thinking.budget_tokens ? ' ' + fmtTok(b.thinking.budget_tokens) : ''}`);
+    const read = u.cache_read_input_tokens || 0, write = u.cache_creation_input_tokens || 0;
+    if (u.input_tokens != null || read || write) {
+      const cached = [read ? `${fmtTok(read)} cached` : '', write ? `${fmtTok(write)} cache write` : ''].filter(Boolean).join(', ');
+      parts.push(`in ${fmtTok((u.input_tokens || 0) + read + write)}${cached ? ` (${cached})` : ''}`);
+    }
+    if (u.output_tokens != null) parts.push(`out ${fmtTok(u.output_tokens)}`);
+    if (m && m.stop_reason) parts.push(`stop: ${m.stop_reason}`);
+    const l2 = h('div', { class: 'l2' });
+    parts.forEach((p, i) => { if (i) l2.append(' · '); l2.append(p); });
+    kids.push(l2);
+    const prev = findPrev(ex);
+    kids.push(h('div', { class: 'l3' }, prev
+      ? h('span', { class: 'chip link', title: 'Show the earlier request of this conversation', onclick: () => { setFollow(false); select(prev.id); } }, `continues #${prev.id}`)
+      : h('span', { class: 'chip newconv' }, 'new conversation')));
+  }
+  const err = errText(ex);
+  if (err) kids.push(h('div', { class: 'banner' }, '⚠ ' + err));
+  E.meta.replaceChildren(...kids);
+}
+function divider(text) { return h('div', { class: 'divider' }, text); }
+function renderSystemBlock(s, i) {
+  const cc = s && s.cache_control;
+  const pin = cc ? h('span', { class: 'pin', title: JSON.stringify(cc) }, `📌 ${cc.type || 'cache'}${cc.ttl ? ' ' + cc.ttl : ''}`) : null;
+  const body = s && s.type === 'text' ? h('pre', { class: 'sys-text' }, s.text) : h('pre', { class: 'json' }, pretty(s));
+  return h('div', { class: 'sysblock' }, h('div', { class: 'sys-meta' }, `block ${i + 1}`, pin), body);
+}
+function renderToolDef(t, name, key) {
+  const summary = [h('span', { class: 'mono' }, name), ' ', muted(oneLine(t.description || '', 100))];
+  return collapsible(key, summary, () => h('div', null,
+    t.description ? h('div', { class: 'pre small' }, t.description) : null,
+    h('pre', { class: 'json' }, pretty(t.input_schema !== undefined ? t.input_schema : t))));
+}
+function renderConversation(ex, root) {
+  const b = reqBody(ex);
+  const msgs = b.messages;
+  const prev = findPrev(ex);
+  const ctx = { exId: ex.id, toolNames: toolNamesOf(msgs, respMsg(ex)), section: 'tail' };
+
+  // system prompt
+  const sys = b.system == null ? [] : typeof b.system === 'string' ? [{ type: 'text', text: b.system }] : Array.isArray(b.system) ? b.system : [b.system];
+  if (sys.length) {
+    const chars = sys.reduce((n, s) => n + ((s && s.text) || '').length, 0);
+    const summary = ['⚙️ System prompt ', muted(`(${plural(sys.length, 'block')}, ${fmtChars(chars)})`)];
+    root.append(collapsible(ex.id + ':sys', summary, () => h('div', null, sys.map(renderSystemBlock)), false, 'top-fold'));
+  }
+  // tools
+  const tools = Array.isArray(b.tools) ? b.tools.filter(Boolean) : [];
+  if (tools.length) {
+    const names = tools.map((t) => t.name || t.type || '?');
+    const summary = [`🧰 Tools (${tools.length}): `, muted(names.slice(0, 8).join(', ') + (names.length > 8 ? ', …' : ''))];
+    root.append(collapsible(ex.id + ':tools', summary,
+      () => h('div', { class: 'toollist' }, tools.map((t, i) => renderToolDef(t, names[i], ex.id + ':tool:' + i))), false, 'top-fold'));
+  }
+
+  // earlier turns vs new tail
+  let fold = 0;
+  if (prev) {
+    fold = Math.min(reqBody(prev).messages.length, msgs.length);
+    if (fold < msgs.length && msgs[fold] && msgs[fold].role === 'assistant') fold++;  // prev's reply, already shown there
+  }
+  if (fold > 0) {
+    root.append(collapsible(ex.id + ':earlier', ['⋯ Earlier turns ', muted(`(${plural(fold, 'message')}, shown in #${prev.id} and before)`)], () =>
+      h('div', null, msgs.slice(0, fold).map((m, i) => renderMessage(m, { ...ctx, section: 'earlier' }, ex.id + ':m:' + i))), false, 'top-fold'));
+  }
+  root.append(divider(prev ? 'new in this request' : 'messages'));
+  if (fold >= msgs.length) root.append(h('div', { class: 'waiting' }, `No new messages: same conversation as #${prev ? prev.id : '?'} (probably a retry).`));
+  for (let i = fold; i < msgs.length; i++) root.append(renderMessage(msgs[i], ctx, ex.id + ':m:' + i));
+
+  root.append(divider('response'));
+  const resp = h('div', { id: 'resp' });
+  root.append(resp);
+  renderResponse(ex, resp);
+}
+function renderResponse(ex, el) {
+  el.replaceChildren();
+  const m = respMsg(ex);
+  const live = ex.state === 'pending' || ex.state === 'streaming';
+  if (!m) {
+    if (live) el.append(h('div', { class: 'waiting' }, ex.state === 'pending' ? 'Waiting for the upstream to answer…' : 'Response started, waiting for the first event…'));
+    else el.append(h('div', { class: 'waiting' }, ex.state === 'error' ? 'No message (see the error above and the Raw response tab).' : 'No message in this response (see Raw response).'));
+    return;
+  }
+  const ctx = { exId: ex.id, toolNames: toolNamesOf(reqBody(ex).messages, m), section: 'resp' };
+  const content = Array.isArray(m.content) ? m.content : [];
+  const nodes = content.map((b, i) => (b ? renderBlock(b, 'assistant', ctx, ex.id + ':r:' + i) : null));
+  if (live) {
+    // blinking cursor at the end of the block being streamed
+    const lastIdx = content.length - 1, last = nodes[lastIdx];
+    const cursor = h('span', { class: 'cursor' });
+    if (!last) nodes.push(h('div', { class: 'waiting' }, 'thinking…', cursor));
+    else if (content[lastIdx].type === 'text') {
+      let at = last;   // the innermost last paragraph / list item / code block
+      while (at.lastElementChild && /^(P|UL|OL|LI|PRE|CODE)$/.test(at.lastElementChild.tagName)) at = at.lastElementChild;
+      at.append(cursor);
+    }
+    else if (content[lastIdx].type === 'thinking') last.querySelector('summary').append(' ', muted('streaming'), cursor);
+    else last.append(cursor);
+  }
+  el.append(h('div', { class: 'msg role-assistant' },
+    h('div', { class: 'role' }, '🤖 ASSISTANT', m.model ? muted(' · ' + m.model) : null),
+    h('div', { class: 'blocks' }, nodes)));
+}
+function renderRawRequest(ex, root) {
+  const text = pretty({ method: ex.method, path: ex.path, headers: ex.request.headers, body: ex.request.body });
+  root.append(rawBox('Request (credentials redacted)', text));
+}
+function renderRawResponse(ex, root) {
+  const r = ex.response || {};
+  const head = [`HTTP ${ex.status == null ? '(no response yet)' : ex.status}`, ...Object.entries(r.headers || {}).map(([k, v]) => `${k}: ${v}`)].join('\n');
+  root.append(rawBox('Response headers', head));
+  let raw = r.raw || '';
+  const note = ex.ended_at ? null : 'Still streaming: this raw text is from when the page last synced. The Conversation tab is live.';
+  if (!raw && ex.ended_at) raw = '(empty body)';
+  root.append(rawBox('Response body, exactly as received' + (r.raw_truncated ? ' (truncated at 2 MB)' : ''), raw, note));
+}
+function rawBox(title, text, note) {
+  return h('div', { class: 'raw' },
+    h('div', { class: 'raw-head' }, h('span', null, title),
+      h('button', { class: 'copy', type: 'button', onclick: (e) => copyText(text, e.currentTarget) }, 'copy')),
+    note ? h('div', { class: 'muted small' }, note) : null,
+    h('pre', { class: 'json' }, text));
+}
+
+// ===== exchange list =========================================================
+const rowEls = new Map();
+function statusBadge(ex) {
+  if (ex.state === 'pending') return h('span', { class: 'badge pending' }, '… pending');
+  if (ex.state === 'streaming') return h('span', { class: 'badge live' }, '● streaming');
+  if (ex.state === 'error') return h('span', { class: 'badge err' }, '✗ ' + (ex.status >= 400 ? ex.status : ((ex.response.error && ex.response.error.type) || 'error')));
+  const sr = respMsg(ex) && respMsg(ex).stop_reason;
+  if (sr) return h('span', { class: 'badge sr-' + sr }, ({ end_turn: '✓ ', tool_use: '▶ ', max_tokens: '⚠ ' }[sr] || '') + sr);
+  return h('span', { class: 'badge' }, ex.status != null ? String(ex.status) : '✓');
+}
+function preview(ex) {
+  const m = respMsg(ex);
+  const content = (m && Array.isArray(m.content) ? m.content : []).filter(Boolean);
+  const text = content.find((b) => b.type === 'text' && b.text && b.text.trim());
+  if (text) return '"' + oneLine(text.text) + '"';
+  const tool = content.find((b) => /tool_use$/.test(b.type || ''));
+  if (tool) return `🔧 ${tool.name} ${tool.input ? keyArg(tool.name, tool.input) : ''}`;
+  if (content.some((b) => b.type === 'thinking')) return '💭 thinking…';
+  const msgs = reqBody(ex).messages, last = msgs[msgs.length - 1];
+  if (!last) return '';
+  if (typeof last.content === 'string') return '👤 ' + oneLine(last.content);
+  const blocks = Array.isArray(last.content) ? last.content : [];
+  const tr = blocks.filter((b) => b && b.type === 'tool_result');
+  if (tr.length) return `👤 ${plural(tr.length, 'tool result')}`;
+  const t = blocks.slice().reverse().find((b) => b && b.type === 'text' && !/^\s*<[\w-]+>/.test(b.text || ''));
+  return t ? '👤 ' + oneLine(t.text) : '';
+}
+function row(ex) {
+  const conv = isConv(ex);
+  const b = reqBody(ex);
+  const label = conv ? shortModel(b.model) : ex.kind === 'count_tokens' ? 'count_tokens' : `${ex.method} ${ex.path.split('?')[0]}`;
+  const onclick = () => {
+    if (ex.id !== newestVisibleId()) setFollow(false);
+    select(ex.id);
+    document.body.classList.remove('drawer');
+  };
+  const r = h('div', { class: 'row' + (conv ? '' : ' other') + (ex.id === S.selected ? ' sel' : ''), onclick, title: ex.path },
+    h('div', { class: 'l1' }, h('span', { class: 'xid' }, '#' + ex.id), h('span', { class: 'time' }, fmtTime(ex.started_at)),
+      h('span', { class: 'model' }, label), statusBadge(ex)));
+  if (conv) { const p = preview(ex); if (p) r.append(h('div', { class: 'l2' }, p)); }
+  return r;
+}
+function renderList() {
+  rowEls.clear();
+  const frag = document.createDocumentFragment();
+  let shown = 0;
+  for (let i = S.order.length - 1; i >= 0; i--) {
+    const ex = S.ex.get(S.order[i]);
+    if (!ex || !visible(ex)) continue;
+    const r = row(ex); rowEls.set(ex.id, r); frag.append(r); shown++;
+  }
+  if (!shown) frag.append(h('div', { class: 'empty-list' }, S.ex.size ? 'Nothing matches this filter yet.' : 'No traffic yet.'));
+  E.list.replaceChildren(frag);
+  E.count.textContent = S.ex.size ? `${shown} of ${S.ex.size}` : '';
+}
+function updateRow(id) {
+  const old = rowEls.get(id), ex = S.ex.get(id);
+  if (!old || !ex) return;
+  const r = row(ex); rowEls.set(id, r); old.replaceWith(r);
+}
+
+// ===== render scheduling =====================================================
+let raf = 0;
+function mark() { if (!raf) raf = requestAnimationFrame(flush); }
+function flush() {
+  raf = 0;
+  const scroll = S.follow && (D.detail || D.resp || D.scroll);
+  try {
+    if (D.list) renderList(); else for (const id of D.rows) updateRow(id);
+    if (D.detail) renderDetail();
+    else {
+      const ex = S.ex.get(S.selected);
+      if (ex && D.head) renderHeader(ex);
+      if (ex && D.resp) { const el = document.getElementById('resp'); if (el) renderResponse(ex, el); }
+    }
+  } catch (e) { console.error(e); }
+  D.list = D.detail = D.head = D.resp = D.scroll = false;
+  D.rows.clear();
+  if (scroll) scrollToBottom();
+}
+function scrollToBottom() { E.body.scrollTop = E.body.scrollHeight; }
+function select(id) {
+  if (S.selected === id) return;
+  if (S.selected != null) D.rows.add(S.selected);
+  D.rows.add(id);
+  S.selected = id; D.detail = true; mark();
+}
+function setFollow(on) {
+  if (S.follow !== on) {
+    S.follow = on;
+    E.follow.classList.toggle('on', on);
+    E.follow.textContent = on ? '● following live' : '⤓ follow live';
+  }
+  if (on) { const id = newestVisibleId(); if (id != null) select(id); D.scroll = true; mark(); }
+}
+
+// ===== live events ===========================================================
+function insertId(id) {
+  const o = S.order;
+  if (!o.length || o[o.length - 1] < id) { o.push(id); return; }
+  let i = o.length; while (i > 0 && o[i - 1] > id) i--;
+  o.splice(i, 0, id);
+}
+function trim() {
+  while (S.order.length > S.keep) {
+    const old = S.order.shift(); S.ex.delete(old); prevCache.delete(old);
+    if (S.selected === old) { S.selected = newestVisibleId(); D.detail = true; }
+  }
+}
+function ensureMsg(resp) { if (!resp.message) resp.message = { role: 'assistant', content: [] }; if (!Array.isArray(resp.message.content)) resp.message.content = []; return resp.message; }
+function blockAt(resp, i) { const c = ensureMsg(resp).content; if (!c[i]) c[i] = { type: 'text', text: '' }; return c[i]; }
+function touch(id, ended) {
+  D.rows.add(id);
+  if (id === S.selected) {
+    const ex = S.ex.get(id);
+    D.head = true;
+    if (tabFor(ex) === 'conv') D.resp = true; else if (ended) D.detail = true;
+  }
+  mark();
+}
+function apply(t, d) {
+  if (t === 'exchange_start') {
+    if (S.ex.has(d.id)) return;
+    S.ex.set(d.id, d); insertId(d.id); S.maxId = Math.max(S.maxId, d.id); trim();
+    if (S.follow && visible(d)) { S.selected = d.id; D.detail = true; }
+    D.list = true; mark();
+    return;
+  }
+  const ex = S.ex.get(d.id);
+  if (!ex) { if (d.id > S.maxId) refetchSoon(); return; }   // unseen id: resync; older ids were evicted
+  if (d.seq <= ex.seq) return;                               // already in the snapshot
+  if (t === 'exchange_end') {
+    d.request = ex.request;                                  // unchanged; keep the parsed copy (and its caches)
+    S.ex.set(d.id, d); touch(d.id, true);
+    return;
+  }
+  if (d.seq !== ex.seq + 1) { refetchSoon(); return; }        // a gap: resync
+  ex.seq = d.seq;
+  const resp = ex.response || (ex.response = {});
+  switch (t) {
+    case 'response_start':
+      ex.status = d.status; ex.state = d.state; ex.response_at = d.response_at; resp.headers = d.headers; break;
+    case 'message_start':
+      resp.message = d.message; ensureMsg(resp); break;
+    case 'block_start': {
+      const b = Object.assign({}, d.block || { type: d.type });
+      if (/tool_use$/.test(b.type || '')) b._partial = '';
+      ensureMsg(resp).content[d.index] = b; break;
+    }
+    case 'block_delta': {
+      const b = blockAt(resp, d.index);
+      if (d.delta_type === 'text') b.text = (b.text || '') + d.text;
+      else if (d.delta_type === 'thinking') b.thinking = (b.thinking || '') + d.text;
+      else if (d.delta_type === 'input_json') b._partial = (b._partial || '') + d.text;
+      break;
+    }
+    case 'block_stop': {
+      const b = blockAt(resp, d.index);
+      if ('input' in d) b.input = d.input;
+      delete b._partial; break;
+    }
+    case 'message_delta': {
+      const m = ensureMsg(resp);
+      m.stop_reason = d.stop_reason; m.stop_sequence = d.stop_sequence;
+      m.usage = Object.assign(m.usage || {}, d.usage || {}); break;
+    }
+  }
+  touch(d.id, false);
+}
+function applySnapshot(j) {
+  if (j.session_started_at !== S.session) {   // first load, or the proxy restarted
+    openState.clear(); S.selected = null;
+    if (S.session) toast('New proxy session');
+    if (!S.follow) setFollow(true);
+  }
+  S.session = j.session_started_at; S.keep = j.keep || 200; S.proxy = j.proxy || null;
+  S.ex = new Map(); S.order = []; S.maxId = 0; prevCache.clear();
+  for (const ex of j.exchanges) { S.ex.set(ex.id, ex); S.order.push(ex.id); S.maxId = Math.max(S.maxId, ex.id); }
+  if (S.follow || !S.ex.has(S.selected)) S.selected = newestVisibleId();
+  E.session.textContent = 'session ' + fmtTime(S.session);
+  renderedId = null;
+  D.list = D.detail = true; D.scroll = true; mark();
+}
+
+let es = null, snapGen = 0, buffered = null, refetchTimer = 0;
+const EVENT_TYPES = ['exchange_start', 'response_start', 'message_start', 'block_start', 'block_delta', 'block_stop', 'message_delta', 'exchange_end'];
+function setConn(on) { E.conn.className = 'conn ' + (on ? 'on' : 'off'); E.conn.textContent = on ? '● live' : '○ disconnected'; }
+function connect() {
+  es = new EventSource('/events');
+  for (const t of EVENT_TYPES) es.addEventListener(t, (e) => {
+    let d; try { d = JSON.parse(e.data); } catch { return; }
+    if (buffered) buffered.push([t, d]); else apply(t, d);
+  });
+  es.onopen = () => { setConn(true); loadSnapshot(); };
+  es.onerror = () => {
+    setConn(false);
+    if (es.readyState === EventSource.CLOSED) { es.close(); setTimeout(connect, 2000); }  // the browser gave up; we don't
+  };
+}
+async function loadSnapshot() {
+  const gen = ++snapGen;
+  if (!buffered) buffered = [];    // hold live events until the snapshot is in
+  try {
+    const r = await fetch('/api/exchanges', { cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    if (gen !== snapGen) return;
+    applySnapshot(j);
+    const q = buffered; buffered = null;
+    for (const [t, d] of q) apply(t, d);
+  } catch (e) {
+    if (gen !== snapGen) return;
+    buffered = null; console.warn('snapshot failed', e); refetchSoon(1500);
+  }
+}
+function refetchSoon(ms = 250) { clearTimeout(refetchTimer); refetchTimer = setTimeout(loadSnapshot, ms); }
+
+// ===== jumping between tool_use and tool_result ==============================
+function jumpTo(exId, selector, foldKey) {
+  setFollow(false);
+  if (isConv(S.ex.get(exId))) S.tab = 'conv';
+  if (S.selected !== exId) { if (S.selected != null) D.rows.add(S.selected); D.rows.add(exId); S.selected = exId; }
+  renderedId = null; renderDetail(); mark();
+  let el = E.body.querySelector(selector);
+  if (!el && foldKey) { openState.set(foldKey, true); renderDetail(); el = E.body.querySelector(selector); }
+  if (!el) { toast('Matching block not found.'); return; }
+  for (let p = el.parentElement; p; p = p.parentElement) if (p.tagName === 'DETAILS' && !p.open) { p.open = true; p._fill && p._fill(); }
+  el.scrollIntoView({ block: 'center' });
+  el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1700);
+}
+const resultIn = (ex, id) => isConv(ex) && eachBlock(reqBody(ex).messages, (b) => b.type === 'tool_result' && b.tool_use_id === id);
+const useInReq = (ex, id) => isConv(ex) && eachBlock(reqBody(ex).messages, (b) => b.id === id && /tool_use$/.test(b.type || ''));
+const useInResp = (ex, id) => !!respMsg(ex) && eachBlock([respMsg(ex)], (b) => b.id === id && /tool_use$/.test(b.type || ''));
+function jumpToResult(id, ctx) {
+  if (!id) return;
+  const sel = `[data-tres="${CSS.escape(id)}"]`;
+  for (const xid of S.order) {
+    if (xid < ctx.exId || (xid === ctx.exId && ctx.section === 'resp')) continue;
+    if (resultIn(S.ex.get(xid), id)) return jumpTo(xid, sel, xid + ':earlier');
+  }
+  toast('No tool_result for this call yet.');
+}
+function jumpToUse(id, ctx) {
+  if (!id) return;
+  const sel = `[data-tuse="${CSS.escape(id)}"]`;
+  const here = S.ex.get(ctx.exId);
+  if (ctx.section === 'earlier' && useInReq(here, id)) return jumpTo(ctx.exId, sel, ctx.exId + ':earlier');
+  for (let i = S.order.length - 1; i >= 0; i--) {
+    const xid = S.order[i];
+    if (xid < ctx.exId && useInResp(S.ex.get(xid), id)) return jumpTo(xid, '#resp ' + sel);
+  }
+  if (useInReq(here, id)) return jumpTo(ctx.exId, sel, ctx.exId + ':earlier');
+  toast('The matching tool_use is no longer retained.');
+}
+
+// ===== controls ==============================================================
+E.filter.addEventListener('change', () => {
+  S.filter = E.filter.value;
+  if (S.follow) { const id = newestVisibleId(); if (id != null && id !== S.selected) { S.selected = id; D.detail = true; } }
+  if (S.selected == null) D.detail = true;
+  D.list = true; mark();
+});
+E.tabs.addEventListener('click', (e) => {
+  const b = e.target.closest('.tab'); if (!b) return;
+  S.tab = b.dataset.tab; renderedId = null; D.detail = true; mark();
+});
+E.follow.addEventListener('click', () => setFollow(!S.follow));
+E.drawer.addEventListener('click', () => document.body.classList.toggle('drawer'));
+// Scrolling up (wheel, keys, scrollbar drag, touch) leaves follow mode.
+const nearBottom = () => E.body.scrollHeight - E.body.scrollTop - E.body.clientHeight < 40;
+let dragging = false;
+E.body.addEventListener('wheel', (e) => { if (e.deltaY < 0 && S.follow) setFollow(false); }, { passive: true });
+E.body.addEventListener('mousedown', (e) => { if (e.offsetX >= E.body.clientWidth) dragging = true; });
+window.addEventListener('mouseup', () => { dragging = false; });
+E.body.addEventListener('scroll', () => { if (dragging && S.follow && !nearBottom()) setFollow(false); });
+E.body.addEventListener('touchmove', () => requestAnimationFrame(() => { if (S.follow && !nearBottom()) setFollow(false); }), { passive: true });
+window.addEventListener('keydown', (e) => {
+  if (e.target.closest && e.target.closest('input, select, textarea')) return;
+  if (['PageUp', 'ArrowUp', 'Home'].includes(e.key) && S.follow) setFollow(false);
+});
+// keep the "elapsed" counter in the header moving while a response is open
+setInterval(() => { const ex = S.ex.get(S.selected); if (ex && !ex.ended_at) { D.head = true; mark(); } }, 500);
+
+D.detail = D.list = true; mark();
+connect();
+})();
+</script>
+</body>
+</html>
